@@ -1,0 +1,109 @@
+import { useState, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
+import { useAuth } from '../contexts/AuthContext'
+
+export default function Dashboard() {
+  const { profile } = useAuth()
+  const [rocks, setRocks] = useState([])
+  const [issues, setIssues] = useState([])
+  const [todos, setTodos] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => { fetchData() }, [profile])
+
+  async function fetchData() {
+    if (!profile) return
+    setLoading(true)
+    const [{ data: r }, { data: i }, { data: t }] = await Promise.all([
+      supabase.from('rocks').select('*, owner:profiles(name)').eq('archived', false).in('level', ['company', 'sector']),
+      supabase.from('issues').select('*').eq('archived', false),
+      supabase.from('todos').select('*').eq('done', false),
+    ])
+    setRocks(r || [])
+    setIssues(i || [])
+    setTodos(t || [])
+    setLoading(false)
+  }
+
+  const company = rocks.filter(r => r.level === 'company')
+  const sector = rocks.filter(r => r.level === 'sector')
+  const onTrack = company.filter(r => r.status === 'on-track').length
+  const rate = (rocks.length + todos.length) > 0 ? Math.round(rocks.filter(r => r.status === 'done').length / (company.length || 1) * 100) : 0
+
+  function statusBadge(s) {
+    const map = { 'on-track': 'badge-green', 'off-track': 'badge-amber', 'done': 'badge-blue', 'lost': 'badge-red' }
+    const labels = { 'on-track': 'On Track', 'off-track': 'Off Track', 'done': 'Done', 'lost': 'Lost' }
+    return <span className={`badge ${map[s] || 'badge-gray'}`}>{labels[s] || s}</span>
+  }
+
+  function progressColor(s) {
+    return s === 'done' ? 'var(--accent)' : s === 'on-track' ? 'var(--green)' : s === 'off-track' ? 'var(--amber)' : 'var(--red)'
+  }
+
+  if (loading) return <div style={page}><div style={{ color: 'var(--muted)', textAlign: 'center', padding: 60 }}>Carregando...</div></div>
+
+  return (
+    <div style={page}>
+      <div style={topbar}>
+        <h1 style={{ fontSize: 16, fontWeight: 600 }}>Dashboard</h1>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Bem-vindo, {profile?.name?.split(' ')[0]}</span>
+      </div>
+
+      <div style={{ padding: 28 }}>
+        {/* STATS */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 14, marginBottom: 28 }}>
+          {[
+            { label: 'Rocks empresa', value: company.length, sub: 'Q2 · 2025', color: 'var(--accent)' },
+            { label: 'On track', value: onTrack, sub: company.length ? Math.round(onTrack/company.length*100)+'% do total' : '—', color: 'var(--green)' },
+            { label: 'Issues abertas', value: issues.length, sub: issues.filter(i=>i.priority<=2).length+' alta prioridade', color: 'var(--amber)' },
+            { label: 'To-Dos pendentes', value: todos.length, sub: 'Sem concluídos', color: 'var(--red)' },
+          ].map(s => (
+            <div key={s.label} className="card" style={{ padding: 18 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: .8, color: 'var(--muted)', marginBottom: 10 }}>{s.label}</div>
+              <div style={{ fontSize: 26, fontWeight: 600, fontFamily: 'var(--mono)', color: s.color }}>{s.value}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>{s.sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* COMPANY ROCKS */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <h2 style={{ fontSize: 15, fontWeight: 600 }}>Metas da Empresa</h2>
+          <span className="badge badge-blue">Q2 · Abr–Jun 2025</span>
+        </div>
+        {company.length ? company.map(r => (
+          <div key={r.id} className="list-item" style={{ cursor: 'default' }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 500, marginBottom: 6 }}>{r.title}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>{r.progress}%</span>
+                <div style={{ flex: 1, maxWidth: 160 }}><div className="progress-bar"><div className="progress-fill" style={{ width: r.progress+'%', background: progressColor(r.status) }} /></div></div>
+              </div>
+            </div>
+            {statusBadge(r.status)}
+          </div>
+        )) : <div style={{ color: 'var(--muted)', fontSize: 13, padding: '20px 0' }}>Nenhuma meta cadastrada.</div>}
+
+        {/* SECTOR ROCKS */}
+        <div style={{ marginTop: 28, marginBottom: 16 }}>
+          <h2 style={{ fontSize: 15, fontWeight: 600 }}>Metas do Setor</h2>
+        </div>
+        {sector.length ? sector.map(r => (
+          <div key={r.id} className="list-item" style={{ cursor: 'default' }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 500, marginBottom: 6 }}>{r.title}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>{r.progress}%</span>
+                <div style={{ flex: 1, maxWidth: 160 }}><div className="progress-bar"><div className="progress-fill" style={{ width: r.progress+'%', background: progressColor(r.status) }} /></div></div>
+              </div>
+            </div>
+            {statusBadge(r.status)}
+          </div>
+        )) : <div style={{ color: 'var(--muted)', fontSize: 13, padding: '20px 0' }}>Nenhuma meta de setor cadastrada.</div>}
+      </div>
+    </div>
+  )
+}
+
+const page = { display: 'flex', flexDirection: 'column', minHeight: '100vh' }
+const topbar = { padding: '16px 28px', borderBottom: '1px solid var(--border)', background: 'var(--surface)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', boxShadow: 'var(--shadow)', position: 'sticky', top: 0, zIndex: 10 }

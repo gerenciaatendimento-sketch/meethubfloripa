@@ -1,0 +1,458 @@
+import { useState, useEffect, useRef } from 'react'
+import { supabase } from '../lib/supabase'
+import { useAuth } from '../contexts/AuthContext'
+
+const AGENDA_DEFAULT = [
+  { name: 'Headlines', time: 5, key: 'headlines' },
+  { name: 'Scorecard', time: 5, key: 'scorecard' },
+  { name: 'Pipe', time: 10, key: 'pipe', optional: true },
+  { name: 'Rocks', time: 5, key: 'rocks' },
+  { name: 'To-Dos', time: 5, key: 'todos' },
+  { name: 'IDS — Issues', time: 60, key: 'issues' },
+  { name: 'Conclusão', time: 5, key: 'conclusion' },
+]
+
+export default function L10() {
+  const { profile } = useAuth()
+  const [active, setActive] = useState(false)
+  const [step, setStep] = useState(0)
+  const [done, setDone] = useState(new Set())
+  const [facilitator, setFacilitator] = useState(profile?.name || '')
+  const [timerSec, setTimerSec] = useState(0)
+  const [timerRunning, setTimerRunning] = useState(false)
+  const [rating, setRating] = useState(0)
+  const [notes, setNotes] = useState('')
+  const [participants, setParticipants] = useState([])
+  const [headlines, setHeadlines] = useState([])
+  const [rocks, setRocks] = useState([])
+  const [scorecard, setScorecard] = useState([])
+  const [todos, setTodos] = useState([])
+  const [issues, setIssues] = useState([])
+  const [team, setTeam] = useState(null)
+  const [issuesResolved, setIssuesResolved] = useState(0)
+  const [todosCreated, setTodosCreated] = useState(0)
+  const [showConfirm, setShowConfirm] = useState(false)
+  const [toast, setToast] = useState('')
+  const timerRef = useRef(null)
+  const today = new Date().toISOString().split('T')[0]
+
+  useEffect(() => { fetchAll() }, [profile])
+  useEffect(() => { return () => clearInterval(timerRef.current) }, [])
+
+  async function fetchAll() {
+    if (!profile) return
+    const [{ data: t }, { data: h }, { data: r }, { data: s }, { data: td }, { data: i }, { data: users }] = await Promise.all([
+      supabase.from('teams').select('*').eq('id', profile.team_id).single(),
+      supabase.from('headlines').select('*').eq('archived', false),
+      supabase.from('rocks').select('*, owner:profiles(name)').eq('archived', false),
+      supabase.from('scorecard_metrics').select('*, values:scorecard_values(*)'),
+      supabase.from('todos').select('*, owner:profiles(name)'),
+      supabase.from('issues').select('*, owner:profiles(name)').eq('archived', false).order('sort_order'),
+      supabase.from('profiles').select('*'),
+    ])
+    setTeam(t)
+    setHeadlines(h || [])
+    setRocks(r || [])
+    setScorecard(s || [])
+    setTodos(td || [])
+    setIssues(i || [])
+    setParticipants((users || []).map(u => ({ ...u, present: true, note: '' })))
+  }
+
+  function showToastMsg(msg) { setToast(msg); setTimeout(() => setToast(''), 3000) }
+
+  function getAgenda() {
+    return AGENDA_DEFAULT.filter(s => {
+      if (s.key === 'pipe') return team?.pipe_enabled
+      return true
+    })
+  }
+
+  function startTimer() {
+    clearInterval(timerRef.current)
+    setTimerSec(0); setTimerRunning(true)
+    timerRef.current = setInterval(() => setTimerSec(s => s + 1), 1000)
+  }
+
+  function toggleTimer() {
+    if (timerRunning) { clearInterval(timerRef.current); setTimerRunning(false) }
+    else { setTimerRunning(true); timerRef.current = setInterval(() => setTimerSec(s => s + 1), 1000) }
+  }
+
+  function fmtTimer(s) { return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}` }
+
+  function goTo(idx) {
+    setDone(d => new Set([...d, step]))
+    setStep(idx)
+    startTimer()
+  }
+
+  function handleStart() {
+    setActive(true); setStep(0); setDone(new Set())
+    setTimerSec(0); setRating(0); setNotes('')
+    setIssuesResolved(0); setTodosCreated(0)
+    document.body.classList.add('dark')
+    startTimer()
+    setShowConfirm(false)
+  }
+
+  async function handleEnd() {
+    // archive checked headlines
+    for (const h of headlines.filter(h => h.checked)) {
+      await supabase.from('headlines').update({ archived: true, archived_at: new Date().toISOString() }).eq('id', h.id)
+    }
+    // save meeting
+    const avg = (() => {
+      const notes = participants.filter(p => p.present).map(p => parseFloat(p.note)).filter(n => !isNaN(n))
+      return notes.length ? Math.round(notes.reduce((a, b) => a + b, 0) / notes.length * 10) / 10 : null
+    })()
+    await supabase.from('l10_meetings').insert({ team_id: profile?.team_id, facilitator_id: profile?.id, started_at: new Date().toISOString(), ended_at: new Date().toISOString(), notes, rating_avg: avg })
+    clearInterval(timerRef.current)
+    document.body.classList.remove('dark')
+    setActive(false)
+    fetchAll()
+    showToastMsg('Reunião encerrada')
+  }
+
+  async function toggleHlCheck(id) {
+    setHeadlines(prev => prev.map(h => h.id === id ? { ...h, checked: !h.checked } : h))
+  }
+
+  async function toggleTodo(id) {
+    const t = todos.find(x => x.id === id)
+    if (!t) return
+    await supabase.from('todos').update({ done: !t.done }).eq('id', id)
+    setTodos(prev => prev.map(x => x.id === id ? { ...x, done: !x.done } : x))
+  }
+
+  async function updateRockStatus(id, val) {
+    await supabase.from('rocks').update({ status: val }).eq('id', id)
+    setRocks(prev => prev.map(r => r.id === id ? { ...r, status: val } : r))
+  }
+
+  async function resolveIssue(id) {
+    await supabase.from('issues').update({ archived: true, archived_at: new Date().toISOString(), resolved_at: new Date().toISOString() }).eq('id', id)
+    setIssues(prev => prev.filter(x => x.id !== id))
+    setIssuesResolved(n => n + 1)
+    showToastMsg('Issue resolvida')
+  }
+
+  const agenda = getAgenda()
+  const currentStep = agenda[step]
+
+  if (!active) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+        <div style={{ padding: '16px 28px', borderBottom: '1px solid var(--border)', background: 'var(--surface)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', boxShadow: 'var(--shadow)' }}>
+          <h1 style={{ fontSize: 16, fontWeight: 600 }}>L10 Meeting</h1>
+        </div>
+        <div style={{ padding: 28 }}>
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 20, boxShadow: 'var(--shadow)', overflow: 'hidden', maxWidth: 640, margin: '0 auto' }}>
+            <div style={{ padding: 40, textAlign: 'center', background: 'linear-gradient(135deg,rgba(59,110,240,.06),rgba(124,58,237,.04))' }}>
+              <div style={{ width: 52, height: 52, borderRadius: 14, background: 'rgba(59,110,240,.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 18px' }}>
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.6"><rect x="3" y="4" width="18" height="18" rx="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" /></svg>
+              </div>
+              <h2 style={{ fontSize: 22, fontWeight: 600, marginBottom: 8 }}>L10 Meeting</h2>
+              <p style={{ fontSize: 13, color: 'var(--muted)' }}>{new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, background: 'var(--border)' }}>
+              {[
+                { label: 'Facilitador', value: <select value={facilitator} onChange={e => setFacilitator(e.target.value)} style={{ background: 'transparent', border: 'none', color: 'var(--text)', fontFamily: 'var(--font)', fontSize: 14, fontWeight: 500, outline: 'none', cursor: 'pointer' }}>{participants.map(p => <option key={p.id}>{p.name}</option>)}</select> },
+                { label: 'Duração prevista', value: `${agenda.reduce((s, a) => s + a.time, 0)} minutos` },
+                { label: 'Issues abertas', value: issues.length },
+                { label: 'To-Dos pendentes', value: todos.filter(t => !t.done).length },
+              ].map(({ label, value }) => (
+                <div key={label} style={{ background: 'var(--surface)', padding: '16px 20px' }}>
+                  <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: .8, color: 'var(--muted)', marginBottom: 6 }}>{label}</div>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>{value}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: '24px 40px', textAlign: 'center', borderTop: '1px solid var(--border)', background: 'var(--surface2)' }}>
+              <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 18 }}>Confirme que o time está presente para iniciar.</p>
+              <button className="btn btn-primary btn-lg" onClick={() => setShowConfirm(true)}>▶ Iniciar reunião</button>
+            </div>
+          </div>
+        </div>
+
+        {showConfirm && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.35)', zIndex: 300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{ background: 'var(--surface)', border: '1px solid var(--border2)', borderRadius: 20, padding: 32, width: 360, textAlign: 'center', boxShadow: 'var(--shadow-md)' }}>
+              <h3 style={{ fontSize: 18, fontWeight: 600, marginBottom: 10 }}>O time está presente?</h3>
+              <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 24, lineHeight: 1.6 }}>Confirme que todos os participantes estão reunidos para iniciar a L10.</p>
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                <button className="btn btn-ghost" onClick={() => setShowConfirm(false)}>Não</button>
+                <button className="btn btn-primary" onClick={handleStart}>Sim, iniciar</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // ACTIVE MEETING
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+      <div style={{ display: 'flex', gap: 20, padding: 20, flex: 1, alignItems: 'flex-start' }}>
+
+        {/* AGENDA SIDEBAR */}
+        <div style={{ width: 210, flexShrink: 0, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', position: 'sticky', top: 20, boxShadow: 'var(--shadow)' }}>
+          <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>L10 Meeting</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{facilitator}</div>
+          </div>
+          {agenda.map((s, i) => (
+            <div key={s.key} onClick={() => goTo(i)} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', cursor: 'pointer', transition: 'background .1s', borderLeft: `3px solid ${i === step ? 'var(--accent)' : 'transparent'}`, background: i === step ? 'rgba(59,110,240,.08)' : 'transparent', opacity: done.has(i) ? .5 : 1 }}>
+              <div style={{ width: 22, height: 22, borderRadius: '50%', background: done.has(i) ? 'var(--green)' : i === step ? 'var(--accent)' : 'var(--surface2)', border: `1px solid ${done.has(i) ? 'var(--green)' : i === step ? 'var(--accent)' : 'var(--border2)'}`, fontSize: 10, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', color: done.has(i) || i === step ? '#fff' : 'var(--muted)', flexShrink: 0, fontFamily: 'var(--mono)' }}>
+                {done.has(i) ? '✓' : i + 1}
+              </div>
+              <div>
+                <div style={{ fontSize: 12.5, color: 'var(--text)' }}>{s.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'var(--mono)' }}>{s.time} min</div>
+              </div>
+            </div>
+          ))}
+          <div style={{ padding: '12px 14px', borderTop: '1px solid var(--border)' }}>
+            <button className="btn btn-danger btn-sm" style={{ width: '100%' }} onClick={handleEnd}>Encerrar reunião</button>
+          </div>
+        </div>
+
+        {/* MAIN */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {/* TOP BAR */}
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', padding: '14px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18, boxShadow: 'var(--shadow)' }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 600 }}>{currentStep?.name}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>Seção {step + 1} / {agenda.length} · {currentStep?.time} min</div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <div onClick={toggleTimer} title="Pausar/retomar" style={{ fontFamily: 'var(--mono)', fontSize: 24, fontWeight: 500, color: timerSec >= (currentStep?.time || 5) * 60 ? 'var(--red)' : 'var(--accent)', letterSpacing: 2, cursor: 'pointer' }}>
+                {fmtTimer(timerSec)}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {step > 0 && <button className="btn btn-ghost btn-sm" onClick={() => { setDone(d => { const n = new Set(d); n.delete(step); return n }); setStep(s => s - 1); startTimer() }}>← Anterior</button>}
+                {step < agenda.length - 1
+                  ? <button className="btn btn-primary btn-sm" onClick={() => goTo(step + 1)}>Próximo →</button>
+                  : <button className="btn btn-success btn-sm" onClick={handleEnd}>✓ Encerrar</button>}
+              </div>
+            </div>
+          </div>
+
+          {/* STEP CONTENT */}
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', overflow: 'hidden', boxShadow: 'var(--shadow)' }}>
+            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'var(--surface2)' }}>
+              <h3 style={{ fontSize: 14, fontWeight: 600 }}>{currentStep?.name}</h3>
+            </div>
+            <div style={{ padding: '18px 20px' }}>
+              {currentStep?.key === 'headlines' && <StepHeadlines headlines={headlines} onCheck={toggleHlCheck} />}
+              {currentStep?.key === 'scorecard' && <StepScorecard scorecard={scorecard} />}
+              {currentStep?.key === 'pipe' && <StepPipe team={team} />}
+              {currentStep?.key === 'rocks' && <StepRocks rocks={rocks} onStatusChange={updateRockStatus} />}
+              {currentStep?.key === 'todos' && <StepTodos todos={todos} onToggle={toggleTodo} today={today} />}
+              {currentStep?.key === 'issues' && <StepIssues issues={issues} onResolve={resolveIssue} />}
+              {currentStep?.key === 'conclusion' && <StepConclusion rocks={rocks} todos={todos} issues={issues} issuesResolved={issuesResolved} todosCreated={todosCreated} headlines={headlines} participants={participants} setParticipants={setParticipants} rating={rating} setRating={setRating} notes={notes} setNotes={setNotes} />}
+            </div>
+          </div>
+        </div>
+      </div>
+      {toast && <div className="toast">✓ {toast}</div>}
+    </div>
+  )
+}
+
+function StepHeadlines({ headlines, onCheck }) {
+  const catLabel = c => c === 'bom' ? '👍 Bom' : c === 'atencao' ? '⚠️ Atenção' : 'ℹ️ Info'
+  if (!headlines.length) return <div style={{ textAlign: 'center', padding: 32, color: 'var(--muted)' }}>Nenhuma headline.</div>
+  return headlines.map(h => (
+    <div key={h.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '11px 0', borderBottom: '1px solid var(--border)' }}>
+      <input type="checkbox" checked={!!h.checked} onChange={() => onCheck(h.id)} style={{ width: 16, height: 16, flexShrink: 0, marginTop: 2, accentColor: 'var(--accent)' }} />
+      <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, padding: '3px 8px', borderRadius: 4, fontWeight: 500, flexShrink: 0, background: h.category === 'bom' ? 'rgba(22,163,74,.12)' : h.category === 'atencao' ? 'rgba(217,119,6,.12)' : 'rgba(59,110,240,.12)', color: h.category === 'bom' ? 'var(--green)' : h.category === 'atencao' ? 'var(--amber)' : 'var(--accent)' }}>{catLabel(h.category)}</span>
+      <div style={{ flex: 1, textDecoration: h.checked ? 'line-through' : 'none', color: h.checked ? 'var(--muted)' : 'var(--text)' }}>
+        <div style={{ fontWeight: 500 }}>{h.title}</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{h.description}</div>
+      </div>
+    </div>
+  ))
+}
+
+function StepScorecard({ scorecard }) {
+  const last4 = ['S-3', 'S-2', 'S-1', 'Esta']
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead><tr>
+          {['Métrica', 'Dono', 'Meta', ...last4].map(h => (
+            <th key={h} style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: .8, color: 'var(--muted)', fontWeight: 500, padding: '8px 10px', textAlign: h.startsWith('S') || h === 'Esta' ? 'center' : 'left', borderBottom: '1px solid var(--border)', background: 'var(--surface2)' }}>{h}</th>
+          ))}
+        </tr></thead>
+        <tbody>{scorecard.map(m => {
+          const vals = (m.values || []).slice(-4)
+          return (
+            <tr key={m.id}>
+              <td style={{ padding: '10px', borderBottom: '1px solid var(--border)', fontWeight: 500 }}>{m.metric_name}</td>
+              <td style={{ padding: '10px', borderBottom: '1px solid var(--border)', fontSize: 12 }}>{m.owner?.name}</td>
+              <td style={{ padding: '10px', borderBottom: '1px solid var(--border)', fontFamily: 'var(--mono)', fontSize: 12 }}>{Number(m.goal).toLocaleString('pt-BR')}</td>
+              {last4.map((w, i) => {
+                const v = vals[i]?.value
+                const ok = v !== undefined && v !== null ? (m.inverted ? v <= m.goal : v >= m.goal) : null
+                return <td key={w} style={{ padding: '10px', borderBottom: '1px solid var(--border)', textAlign: 'center' }}>
+                  <div style={{ width: 26, height: 26, borderRadius: 5, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 500, background: ok === true ? 'rgba(22,163,74,.15)' : ok === false ? 'rgba(220,38,38,.15)' : 'var(--surface2)', color: ok === true ? 'var(--green)' : ok === false ? 'var(--red)' : 'var(--muted)' }}>
+                    {v !== undefined && v !== null ? (v >= 1000 ? Math.round(v / 1000) + 'k' : v) : '—'}
+                  </div>
+                </td>
+              })}
+            </tr>
+          )
+        })}</tbody>
+      </table>
+    </div>
+  )
+}
+
+function StepPipe({ team }) {
+  return (
+    <div style={{ textAlign: 'center', padding: '40px 20px' }}>
+      <div style={{ fontSize: 32, marginBottom: 16 }}>📊</div>
+      <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>{team?.pipe_message || 'Acesse o pipeline para revisão'}</div>
+      {team?.pipe_link && (
+        <a href={team.pipe_link} target="_blank" rel="noreferrer" className="btn btn-primary" style={{ textDecoration: 'none', display: 'inline-flex' }}>
+          Abrir pipeline →
+        </a>
+      )}
+    </div>
+  )
+}
+
+function StepRocks({ rocks, onStatusChange }) {
+  const statusBadge = s => {
+    const map = { 'on-track': ['badge-green', 'On Track'], 'off-track': ['badge-amber', 'Off Track'], 'done': ['badge-blue', 'Done'], 'lost': ['badge-red', 'Lost'] }
+    const [cls, label] = map[s] || ['badge-gray', s]
+    return <span className={`badge ${cls}`}>{label}</span>
+  }
+  const progressColor = s => s === 'done' ? 'var(--accent)' : s === 'on-track' ? 'var(--green)' : s === 'off-track' ? 'var(--amber)' : 'var(--red)'
+  const byOwner = {}
+  rocks.forEach(r => { if (!byOwner[r.owner?.name]) byOwner[r.owner?.name] = []; byOwner[r.owner?.name].push(r) })
+  return (
+    <div>
+      {Object.keys(byOwner).map(owner => (
+        <div key={owner}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: .8, margin: '12px 0 6px', display: 'flex', alignItems: 'center', gap: 8 }}>{owner}</div>
+          {byOwner[owner].map(r => (
+            <div key={r.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '11px 0', borderBottom: '1px solid var(--border)' }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 500 }}>{r.title}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>{r.progress}%</span>
+                  <div style={{ flex: 1, maxWidth: 100 }}><div className="progress-bar"><div className="progress-fill" style={{ width: r.progress + '%', background: progressColor(r.status) }} /></div></div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {statusBadge(r.status)}
+                <select value={r.status} onChange={e => onStatusChange(r.id, e.target.value)} style={{ background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', fontFamily: 'var(--font)', fontSize: 12, padding: '4px 8px', borderRadius: 'var(--radius)', outline: 'none' }}>
+                  <option value="on-track">On Track</option>
+                  <option value="off-track">Off Track</option>
+                  <option value="done">Done</option>
+                  <option value="lost">Lost</option>
+                </select>
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StepTodos({ todos, onToggle, today }) {
+  const done = todos.filter(t => t.done).length
+  const rate = todos.length ? Math.round(done / todos.length * 100) : 0
+  const col = rate >= 90 ? 'var(--green)' : rate >= 60 ? 'var(--amber)' : 'var(--red)'
+  return (
+    <div>
+      <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 13, color: 'var(--muted)' }}>Taxa de conclusão:</span>
+        <strong style={{ color: col, fontFamily: 'var(--mono)' }}>{rate}%</strong>
+      </div>
+      {todos.map(t => (
+        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 0', borderBottom: '1px solid var(--border)' }}>
+          <div onClick={() => onToggle(t.id)} style={{ width: 18, height: 18, border: `1.5px solid ${t.done ? 'var(--green)' : 'var(--border2)'}`, borderRadius: 4, flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', background: t.done ? 'var(--green)' : 'transparent' }}>
+            {t.done && <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><polyline points="2,6 5,9 10,3" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+          </div>
+          <div style={{ flex: 1, textDecoration: t.done ? 'line-through' : 'none', color: t.done ? 'var(--muted)' : 'var(--text)', fontWeight: 500 }}>{t.title}</div>
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>{t.owner?.name}</span>
+          <span style={{ fontSize: 11, fontFamily: 'var(--mono)', color: !t.done && t.due_date < today ? 'var(--red)' : 'var(--muted)' }}>
+            {t.due_date ? `${t.due_date.split('-')[2]}/${t.due_date.split('-')[1]}` : '—'}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StepIssues({ issues, onResolve }) {
+  const pColor = p => p <= 1 ? 'var(--red)' : p === 2 ? 'var(--amber)' : p === 3 ? 'var(--accent)' : 'var(--muted)'
+  const pBg = p => p <= 1 ? 'rgba(220,38,38,.15)' : p === 2 ? 'rgba(217,119,6,.15)' : p === 3 ? 'rgba(59,110,240,.15)' : 'var(--surface2)'
+  if (!issues.length) return <div style={{ textAlign: 'center', padding: 32, color: 'var(--muted)' }}>Nenhuma issue aberta.</div>
+  return issues.map(iss => (
+    <div key={iss.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '11px 0', borderBottom: '1px solid var(--border)' }}>
+      <div style={{ width: 26, height: 26, borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 600, fontFamily: 'var(--mono)', flexShrink: 0, background: pBg(iss.priority), color: pColor(iss.priority) }}>{iss.priority}</div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontWeight: 500 }}>{iss.title}</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{iss.detail}</div>
+      </div>
+      <span style={{ fontSize: 12, color: 'var(--muted)' }}>{iss.owner?.name}</span>
+      <button className="btn btn-danger btn-sm" onClick={() => onResolve(iss.id)}>Resolver</button>
+    </div>
+  ))
+}
+
+function StepConclusion({ rocks, todos, issues, issuesResolved, todosCreated, headlines, participants, setParticipants, rating, setRating, notes, setNotes }) {
+  const onTrack = rocks.filter(r => r.status === 'on-track').length
+  const rate = todos.length ? Math.round(todos.filter(t => t.done).length / todos.length * 100) : 0
+  const present = participants.filter(p => p.present)
+  const notas = present.map(p => parseFloat(p.note)).filter(n => !isNaN(n) && n >= 0 && n <= 10)
+  const media = notas.length ? Math.round(notas.reduce((a, b) => a + b, 0) / notas.length * 10) / 10 : null
+  const hotpoints = [
+    rocks.filter(r => r.status === 'done').length ? `✅ ${rocks.filter(r => r.status === 'done').length} Rock(s) concluídos` : '',
+    rocks.filter(r => r.status === 'off-track').length ? `⚠️ ${rocks.filter(r => r.status === 'off-track').length} Rock(s) off track` : '',
+    rocks.filter(r => r.status === 'lost').length ? `🔴 ${rocks.filter(r => r.status === 'lost').length} Rock(s) lost` : '',
+    issuesResolved ? `✅ ${issuesResolved} issue(s) resolvida(s)` : '',
+    todosCreated ? `📋 ${todosCreated} to-do(s) criado(s)` : '',
+    `📊 Taxa de conclusão: ${rate}%`,
+    `🪨 Rocks on track: ${onTrack}/${rocks.length}`,
+    headlines.filter(h => h.checked).length ? `📰 ${headlines.filter(h => h.checked).length} headline(s) serão arquivadas` : '',
+  ].filter(Boolean)
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>📋 Resumo da reunião</div>
+        <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16 }}>
+          {hotpoints.map((h, i) => <div key={i} style={{ fontSize: 13, padding: '7px 0', borderBottom: '1px solid var(--border)', lineHeight: 1.5 }}>{h}</div>)}
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Notas finais</div>
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="Decisões, próximos passos..." style={{ width: '100%', background: 'var(--surface2)', border: '1px solid var(--border)', color: 'var(--text)', fontFamily: 'var(--font)', fontSize: 13, padding: 10, borderRadius: 'var(--radius)', outline: 'none', resize: 'vertical', minHeight: 100, display: 'block' }} />
+        </div>
+      </div>
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>👥 Participantes</div>
+        <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16 }}>
+          {participants.map((p, i) => (
+            <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: '1px solid var(--border)', opacity: p.present ? 1 : .45 }}>
+              <input type="checkbox" checked={p.present} onChange={() => setParticipants(prev => prev.map((x, xi) => xi === i ? { ...x, present: !x.present } : x))} style={{ cursor: 'pointer', accentColor: 'var(--accent)', width: 15, height: 15 }} />
+              <div style={{ flex: 1, fontSize: 13 }}>{p.name}</div>
+              <input type="number" min={0} max={10} step={0.5} placeholder="—" value={p.note} disabled={!p.present}
+                onChange={e => setParticipants(prev => prev.map((x, xi) => xi === i ? { ...x, note: e.target.value } : x))}
+                style={{ width: 60, background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)', fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600, padding: '5px 8px', borderRadius: 'var(--radius)', outline: 'none', textAlign: 'center' }} />
+            </div>
+          ))}
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 13, color: 'var(--muted)' }}>Média da reunião</span>
+            <span style={{ fontSize: 24, fontWeight: 600, fontFamily: 'var(--mono)', color: media === null ? 'var(--muted)' : media >= 8 ? 'var(--green)' : media >= 6 ? 'var(--amber)' : 'var(--red)' }}>{media !== null ? media : '—'}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

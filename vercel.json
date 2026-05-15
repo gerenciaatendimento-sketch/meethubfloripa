@@ -1,0 +1,65 @@
+import { useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { useAuth } from '../contexts/AuthContext'
+
+export default function Register() {
+  const { signUp } = useAuth()
+  const navigate = useNavigate()
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(e) {
+    e.preventDefault()
+    setError('')
+    if (password.length < 6) { setError('A senha deve ter pelo menos 6 caracteres.'); return }
+    setLoading(true)
+    const { error } = await signUp(email, password, name)
+    if (error) setError(error.message)
+    else navigate('/')
+    setLoading(false)
+  }
+
+  return (
+    <div style={styles.page}>
+      <div style={styles.card}>
+        <div style={styles.logo}>Meet <span style={{ color: 'var(--accent)' }}>Hub</span></div>
+        <h1 style={styles.title}>Criar conta</h1>
+        <p style={styles.sub}>Preencha os dados para acessar a plataforma</p>
+        <form onSubmit={handleSubmit}>
+          <div className="form-field">
+            <label>Nome completo</label>
+            <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Seu nome" required />
+          </div>
+          <div className="form-field">
+            <label>Email</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="seu@email.com" required />
+          </div>
+          <div className="form-field">
+            <label>Senha</label>
+            <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Mínimo 6 caracteres" required />
+          </div>
+          {error && <div className="form-error" style={{ marginBottom: 12 }}>{error}</div>}
+          <button className="btn btn-primary btn-lg" type="submit" disabled={loading} style={{ width: '100%', justifyContent: 'center' }}>
+            {loading ? 'Criando...' : 'Criar conta'}
+          </button>
+        </form>
+        <div style={styles.links}>
+          <Link to="/login" style={styles.link}>Já tenho conta</Link>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+const styles = {
+  page: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)', padding: 24 },
+  card: { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 20, padding: 40, width: '100%', maxWidth: 420, boxShadow: 'var(--shadow-md)' },
+  logo: { fontSize: 22, fontWeight: 700, marginBottom: 28, letterSpacing: -0.5 },
+  title: { fontSize: 22, fontWeight: 600, marginBottom: 6 },
+  sub: { fontSize: 14, color: 'var(--muted)', marginBottom: 28 },
+  links: { marginTop: 20, textAlign: 'center' },
+  link: { fontSize: 13, color: 'var(--accent)', textDecoration: 'none' },
+}
